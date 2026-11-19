@@ -11,11 +11,12 @@ permissions:
 on:
   push:
   pull_request:
-  # workflow_dispatch:
-  #   inputs:
-  #     tag_name:
-  #       description: 'Tag name for release'
-  #       required: true
+  # [fork] 打开手动触发：CI 失败后可直接重跑，无需新建 tag
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release'
+        required: false
 
 # Uncomment to run this workflow only when a tag is pushed
 # Can set custom wildcards instead of '*', like 'v*' for tags starting with v

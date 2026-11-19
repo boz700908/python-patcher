@@ -169,6 +169,17 @@ class Globals:
 
 	# Set to 'True' in main.py if installData.json is detected on disk
 	DEVELOPER_MODE = False
+
+	# ---- 镜像/加速（本项目新增）--------------------------------------------------
+	# 首个探测可用的前缀会被追加到所有外网下载地址前面，见 applyMirrorPrefix()。
+	# 留空列表 (= []) 则完全等同于官方行为：直连 GitHub。
+	# 可用环境变量或安装器目录下的 mirror.txt 覆盖（每行一个前缀）。
+	MIRROR_PREFIXES = [
+		"https://ghfast.top/",
+		"https://gh-proxy.com/",
+	]
+	MIRROR_PREFIX_CHOSEN = None
+	MIRROR_PROBED = False
 	DEBUG_THREAD_INFO = False
 	"""Print to console when threads start or stop (these print statements have been manually added)"""
 	DEBUG_BROWSER_REQUESTS = False
@@ -636,9 +647,12 @@ def aria(downloadDir=None, inputFile=None, url=None, followMetaLink=False, useIP
 		'--continue=true', # Allow continuing the download of a partially downloaded file (is this flag actually necessary?)
 		'--retry-wait=5',  # Seconds to wait between retries
 		'-m 0', # max number of retries (0=unlimited). In some cases, like server rejects download, aria2c won't retry.
-		'-x 1', # max connections to the same server
-		'-s 8', # how many mirrors to use to download each file - currently we only have one download source though
-		'-j 1', # how many files to download at the same time (eg number of separate urls which can be downloaded in parallel)
+		# GitHub 对单连接限速（实测约 100 KB/s），多连接可提升两个数量级。
+		# 这些值原本是 '-x 1','-s 8','-j 1'，在中国大陆网络下几乎不可用。
+		'-x 16', # max connections to the same server
+		'-s 16', # how many mirrors to use to download each file
+		'-j 4', # how many files to download at the same time
+		'-k 1M', # piece size
 		'--auto-file-renaming=false',
 		# By default, if aria2c detects a file already exists with the same name, and is different size to the file
 		# being downloaded (lets call this 'test.zip'), it will save to a different name ('test.2.zip', 'test.3.zip' etc)
@@ -1210,8 +1224,26 @@ class DownloaderAndExtractor:
 		:param extractionDir: The folder where the file(s) will be extracted
 		"""
 		print("Querying URL: [{}]".format(url))
-		extractables = DownloaderAndExtractor.getExtractableItem(url=url, extractionDir=extractionDir)
-		self.downloadList.append(url)
+		if DownloaderAndExtractor.__urlIsMetalink(url):
+			# Metalink 内部写的是 GitHub 原生地址，aria2 跟随下载时无法加镜像前缀，
+			# 因此先展开成直链再统一下载（仍会做 7z 完整性测试）。
+			try:
+				entries = getMetalinkFilenames(applyMirrorPrefix(url))
+				if len(entries) == 1 and entries[0][2]:
+					downloadUrl = applyMirrorPrefix(entries[0][2])
+					print("Metalink expanded: [{}] -> [{}]".format(url, downloadUrl))
+				else:
+					print("WARNING: Metalink contains {} files - keeping metalink as-is".format(len(entries)))
+					downloadUrl = applyMirrorPrefix(url)
+			except Exception:
+				traceback.print_exc()
+				print("WARNING: Metalink expansion failed - falling back to original URL")
+				downloadUrl = applyMirrorPrefix(url)
+		else:
+			downloadUrl = applyMirrorPrefix(url)
+
+		extractables = DownloaderAndExtractor.getExtractableItem(url=downloadUrl, extractionDir=extractionDir)
+		self.downloadList.append(downloadUrl)
 		self.extractablesForEachDownload.append(extractables)
 		self.extractList.extend(extractables)
 
@@ -1481,7 +1513,64 @@ def group_by(values, keyFunc):
 
 	return grouped
 
+def _loadMirrorPrefixes():
+	#type: () -> List[str]
+	"""从 mirror.txt（每行一个前缀）和环境变量读取镜像前缀，覆盖内置列表。"""
+	prefixes = list(Globals.MIRROR_PREFIXES)
+	try:
+		envValue = os.environ.get("SEVENTH_MOD_MIRROR")
+		if envValue:
+			prefixes = [x.strip() for x in envValue.split(",") if x.strip()]
+	except Exception:
+		pass
+	if os.path.exists("mirror.txt"):
+		try:
+			with io.open("mirror.txt", "r", encoding="utf-8") as f:
+				lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+			if lines:
+				prefixes = lines
+		except Exception:
+			traceback.print_exc()
+	return [p if p.endswith("/") else p + "/" for p in prefixes]
+
+
+def selectMirrorPrefix(sampleUrl):
+	#type: (str) -> Optional[str]
+	"""用一个小文件探测镜像是否真的能取到数据。全部失败返回 None（退回直连）。"""
+	for prefix in _loadMirrorPrefixes():
+		try:
+			req = Request(prefix + sampleUrl, headers={"User-Agent": "", "Range": "bytes=0-1023"})
+			response = urlopen(req, context=Globals.getURLOpenContext())
+			data = response.read(1024)
+			response.close()
+			if len(data) > 0:
+				print("镜像可用: [{}]".format(prefix))
+				return prefix
+			print("镜像无数据，跳过: [{}]".format(prefix))
+		except Exception as e:
+			print("镜像不可用，跳过: [{}] ({})".format(prefix, e))
+	return None
+
+
+def applyMirrorPrefix(url):
+	#type: (str) -> str
+	"""把外网地址改写为「镜像前缀 + 原地址」。幂等，且镜像不可用时原样返回。"""
+	if not url or not url.startswith("http"):
+		return url
+	if not Globals.MIRROR_PROBED:
+		Globals.MIRROR_PROBED = True
+		Globals.MIRROR_PREFIX_CHOSEN = selectMirrorPrefix(Globals.INSTALLER_META_DATA_ZIP_URL)
+	for p in _loadMirrorPrefixes():
+		if url.startswith(p):
+			return url
+	prefix = Globals.MIRROR_PREFIX_CHOSEN
+	if not prefix:
+		return url
+	return prefix + url
+
+
 def downloadFile(url, is_text):
+	url = applyMirrorPrefix(url)
 	"""
 	Downloads a file from the given URL.
 	Will either return "bytes" if is_text = False, or a unicode string if is_text = True

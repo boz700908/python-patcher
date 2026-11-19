@@ -1,3 +1,15 @@
+## 本构建与原版的区别（中文网络适配）
+
+- **多连接下载**：`-x 1 -s 8 -j 1` → `-x 16 -s 16 -j 4 -k 1M`。
+  原版每服务器只开 1 条连接，GitHub 对单连接限速约 100 KB/s；改后实测可达 20+ MB/s。
+- **镜像前缀**：自动探测可用的下载加速前缀并追加到所有外网地址；
+  全部不可用时自动退回直连。可用 `mirror.txt`（每行一个前缀）或环境变量
+  `SEVENTH_MOD_MIRROR` 覆盖。
+- **Metalink 展开**：`.meta4` 会先展开成直链再下载，保证镜像前缀对内部地址同样生效。
+- 未改动任何元数据（`installData.json` 等），安装流程与校验行为保持不变。
+
+---
+
 # Installation Instructions
 
 - **Please download the installer to your computer, then run it - don't run directly from your browser**

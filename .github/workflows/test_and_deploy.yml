@@ -3,6 +3,10 @@
 
 name: Test and Deploy
 
+# 发布 release 需要写权限（fork 的 GITHUB_TOKEN 默认多为只读）
+permissions:
+  contents: write
+
 # Run this workflow on every push or pull request
 on:
   push:
@@ -87,11 +91,14 @@ jobs:
         run: python travis_build_script.py
 
       # Run virus scan (only on tagged builds)
+      # [fork] VirusTotal 需要原仓库才有的 VT_API_KEY；缺失时跳过，且永不阻断产物上传
       - name: Run VirusTotal Scan
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' # only scan when releasing
+        continue-on-error: true
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         env:
           VT_API_KEY: ${{ secrets.VT_API_KEY }}
         run: |
+          if [ -z "$VT_API_KEY" ]; then echo "VT_API_KEY 未配置，跳过 VirusTotal 扫描"; exit 0; fi
           pip install vt-py
           python virusTotalScan.py
 
@@ -136,18 +143,7 @@ jobs:
         if: steps.filter.outputs.metadata-changed == 'true'
         run: bash travis_validate_json.sh
 
-      # Build installMetadata.zip
-      # Only run this if the JSON validation was successful, in case there is an error in one of the JSON files
-      # NOTE: This PAT will expire periodically, but Github should send a reminder to renew it.
-      - name: Trigger installMetadata.zip build in python-patcher-metadata repo
-        if: github.ref == 'refs/heads/master' && steps.filter.outputs.metadata-changed == 'true'
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: build.yml
-          repo: 07th-mod/python-patcher-metadata
-          # Required when using the `repo` option. Either a PAT or a token generated from the GitHub app or CLI
-          token: "${{ secrets.PYTHON_PATCHER_METADATA_PAT }}"
-          ref: main # this repo uses 'master', but the python-patcher-metadata uses 'main'
+      # [fork] 已移除跨仓库触发 installMetadata.zip 的步骤（它依赖原仓库的 PAT）
 
       # Download Windows artifacts
       - name: Download all Windows .exe artifacts
